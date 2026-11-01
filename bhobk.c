@@ -1,45 +1,152 @@
 /*
- * bhobk.c — OBK 象棋开局库查询工具
+ * bhobk.c — jqxq 二进制象棋开局库查询工具
  *
  * 用法:
  *   bhobk.exe                       查询初始局面
  *   bhobk.exe "<FEN>"               查询指定局面(FEN 含空格需加引号)
- *   bhobk.exe --key <vkey>          直接按 vkey 查询(无棋盘,只显示原始走法码)
- *   bhobk.exe --demo                查询演示 key 15265892774299731920
+ *   bhobk.exe --key <vkey>          按 jqxq key 查询(十进制或 0x 十六进制)
+ *   bhobk.exe --demo                查询初始局面 key 0x52DFA0347C3B4C0F
  *   bhobk.exe --play 着法1 着法2 .. 分叉跟踪(中文着法或 ICCS, 如 炮二平五 马8进7)
  *   bhobk.exe --play                交互式分叉跟踪(逐行输入着法, b=回退一步, 空行/q 退出)
- *   bhobk.exe --db <文件>           指定开局库(默认 test.obk)
- *   bhobk.exe --check               快速检查开局库是否合法
+ *   bhobk.exe --book <文件>         指定开局库(默认 book.bin)
+ *   bhobk.exe --check               检查二进制开局库是否合法
  *   bhobk.exe -h, --help            显示命令行帮助
  *
- * vkey 计算: Zobrist 哈希, 14 棋子 x 256 格随机表异或, 红走再异或 ZP。
- * 棋子编号: 红 帅0 仕1 相2 马3 车4 炮5 兵6; 黑 将7 士8 象9 马10 车11 炮12 卒13
- * 走法编码: move = (from << 8) | to, 坐标为 16x16 mailbox(左上角 0x33)
+ * 记录格式: 小端 key:uint64 / move:uint16 / count:uint16 / learn:uint32。
+ * 走法编码: move = (from << 8) | to, 坐标为 16x16 mailbox(左上角 0x33)。
  */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "sqlite3.h"
-#include "zobrist.h"
+#include "jqxq_zobrist.h"
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
 #define START_FEN "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
-
-sqlite3 *db;
-static const char *book_path = "test.obk";
+#define BOOK_ENTRY_SIZE 16
 
 typedef struct book_entry_t {
-    unsigned __int16 move ;
-    __int32 score ;
-    __int32 win_count ;
-    __int32 draw_count ;
-    __int32 lost_count ;
-    unsigned __int16 valid ;
-    char comments[64];
+    unsigned __int64 key;
+    unsigned __int16 move;
+    unsigned __int16 weight;
 } book_entry_t ;
+
+static const char *book_path = "book.bin";
+static unsigned char *book_data = NULL;
+static size_t book_entry_count = 0;
+static size_t book_position_count = 0;
+
+static unsigned __int16 read_u16le(const unsigned char *p)
+{
+    return (unsigned __int16)(p[0] | ((unsigned __int16)p[1] << 8));
+}
+
+static unsigned __int32 read_u32le(const unsigned char *p)
+{
+    return (unsigned __int32)p[0] | ((unsigned __int32)p[1] << 8) |
+           ((unsigned __int32)p[2] << 16) | ((unsigned __int32)p[3] << 24);
+}
+
+static unsigned __int64 read_u64le(const unsigned char *p)
+{
+    unsigned __int64 value = 0;
+    int i;
+    for(i = 0; i < 8; i++) value |= (unsigned __int64)p[i] << (8 * i);
+    return value;
+}
+
+static book_entry_t read_book_entry(size_t index)
+{
+    const unsigned char *p = book_data + index * BOOK_ENTRY_SIZE;
+    book_entry_t entry;
+    entry.key = read_u64le(p);
+    entry.move = read_u16le(p + 8);
+    entry.weight = read_u16le(p + 10);
+    return entry;
+}
+
+static void free_book(void)
+{
+    free(book_data);
+    book_data = NULL;
+    book_entry_count = 0;
+    book_position_count = 0;
+}
+
+static int load_book(const char *path)
+{
+    FILE *file;
+    long size;
+    size_t i;
+    unsigned __int64 previous_key = 0;
+    unsigned __int16 previous_move = 0;
+
+    free_book();
+    file = fopen(path, "rb");
+    if(!file)
+    {
+        printf("无法打开 %s\n", path);
+        return 0;
+    }
+    if(fseek(file, 0, SEEK_END) || (size = ftell(file)) < 0 || fseek(file, 0, SEEK_SET))
+    {
+        printf("无法读取 %s\n", path);
+        fclose(file);
+        return 0;
+    }
+    if(size % BOOK_ENTRY_SIZE)
+    {
+        printf("开局库不合法: 文件长度 %ld 不是 16 的倍数\n", size);
+        fclose(file);
+        return 0;
+    }
+    book_entry_count = (size_t)size / BOOK_ENTRY_SIZE;
+    if(book_entry_count)
+    {
+        book_data = (unsigned char*)malloc((size_t)size);
+        if(!book_data || fread(book_data, 1, (size_t)size, file) != (size_t)size)
+        {
+            printf("无法读取 %s\n", path);
+            fclose(file);
+            free_book();
+            return 0;
+        }
+    }
+    fclose(file);
+
+    for(i = 0; i < book_entry_count; i++)
+    {
+        const unsigned char *p = book_data + i * BOOK_ENTRY_SIZE;
+        unsigned __int64 key = read_u64le(p);
+        unsigned __int16 move = read_u16le(p + 8);
+        unsigned __int16 weight = read_u16le(p + 10);
+        unsigned __int32 learn = read_u32le(p + 12);
+        if(i && (key < previous_key || (key == previous_key && move <= previous_move)))
+        {
+            printf("开局库不合法: 记录在字节 %Iu 处未按 key/move 严格排序\n", i * BOOK_ENTRY_SIZE);
+            free_book();
+            return 0;
+        }
+        if(!weight)
+        {
+            printf("开局库不合法: 记录在字节 %Iu 处权重为零\n", i * BOOK_ENTRY_SIZE);
+            free_book();
+            return 0;
+        }
+        if(learn)
+        {
+            printf("开局库不合法: 记录在字节 %Iu 处 learn 非零\n", i * BOOK_ENTRY_SIZE);
+            free_book();
+            return 0;
+        }
+        if(!i || key != previous_key) book_position_count++;
+        previous_key = key;
+        previous_move = move;
+    }
+    return 1;
+}
 
 /* ---------- Zobrist 键计算 ---------- */
 
@@ -80,24 +187,25 @@ static int fen_to_board(const char *fen, char board[10][9])
         if(*fen == '/') fen++;
         else if(r < 9) return -1;
     }
-    /* 走子方: 缺省或 'w' 为红 */
     while(*fen == ' ') fen++;
     return (*fen == 'b') ? 0 : 1;
 }
 
 static unsigned __int64 board_to_key(char board[10][9], int red_to_move)
 {
+    static const int types[7] = {7, 3, 2, 5, 6, 4, 1};
     unsigned __int64 key = 0;
-    int r, c, id, sq;
+    int r, c, id, sq, type;
     for(r = 0; r < 10; r++)
         for(c = 0; c < 9; c++)
             if(board[r][c])
             {
                 id = chess_id(board[r][c]);
                 sq = ((r + 3) << 4) | (c + 3);
-                key ^= ZT[id][sq];
+                type = types[id % 7] + (id >= 7 ? 7 : 0);
+                key ^= JQZT[type * 256 + sq];
             }
-    if(red_to_move) key ^= ZP;
+    if(!red_to_move) key ^= JQZT[3840];
     return key;
 }
 
@@ -105,44 +213,21 @@ static unsigned __int64 board_to_key(char board[10][9], int red_to_move)
 
 int GetBookEntry(book_entry_t *entry, unsigned __int64 key)
 {
-    sqlite3_stmt *stmt = NULL ;
-    int n = 0 ;
-    sqlite3_prepare_v2(db, "select vmove,vscore,vwin,vdraw,vlost,vvalid,vmemo from bhobk where vkey=?;", -1, &stmt, NULL);
-    if(!stmt) return 0 ;
-    if(key < 0x8000000000000000ULL)
+    size_t low = 0, high = book_entry_count;
+    int n = 0;
+    while(low < high)
     {
-        /* key 在 int64 范围内, 库中按 INTEGER 存储 */
-        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)key);
+        size_t mid = low + (high - low) / 2;
+        if(read_book_entry(mid).key < key) low = mid + 1;
+        else high = mid;
     }
-    else
+    while(low < book_entry_count && n < 128)
     {
-        /* key 超过 int64 上限, 库中按位模式重解释的 REAL 存储 */
-        double d ;
-        memcpy(&d, &key, 8);
-        sqlite3_bind_double(stmt, 1, d);
+        book_entry_t current = read_book_entry(low++);
+        if(current.key != key) break;
+        entry[n++] = current;
     }
-    while(SQLITE_ROW == sqlite3_step(stmt) && n < 128)
-    {
-        const char *cm ;
-        int len ;
-        entry[n].move = (unsigned __int16)sqlite3_column_int(stmt, 0);
-        entry[n].score = sqlite3_column_int(stmt, 1);
-        entry[n].win_count = sqlite3_column_int(stmt, 2);
-        entry[n].draw_count = sqlite3_column_int(stmt, 3);
-        entry[n].lost_count = sqlite3_column_int(stmt, 4);
-        entry[n].valid = (unsigned __int16)sqlite3_column_int(stmt, 5);
-        cm = (const char*)sqlite3_column_text(stmt, 6);
-        len = sqlite3_column_bytes(stmt, 6);
-        if(cm && len > 0)
-        {
-            if(len > 63) len = 63;
-            memcpy(entry[n].comments, cm, len);
-            entry[n].comments[len] = 0;
-        }
-        n++;
-    }
-    sqlite3_finalize(stmt);
-    return n ;
+    return n;
 }
 
 /* ---------- 中文着法翻译 ---------- */
@@ -234,25 +319,10 @@ static void move_iccs(unsigned __int16 mv, char *out)
     sprintf(out, "%c%d-%c%d", 'a' + fc, 9 - fr, 'a' + tc, 9 - tr);
 }
 
-/* vmemo 是 GBK 编码, 转 UTF-8 输出 */
-static void memo_utf8(const char *in, char *out, int outsz)
-{
-#ifdef _WIN32
-    wchar_t w[128];
-    if(MultiByteToWideChar(936, 0, in, -1, w, 128) > 0)
-    {
-        WideCharToMultiByte(65001, 0, w, -1, out, outsz, NULL, NULL);
-        return;
-    }
-#endif
-    strncpy(out, in, outsz - 1);
-    out[outsz - 1] = 0;
-}
-
-/* 按评分降序 */
+/* 按权重降序 */
 static int cmp_entry(const void *a, const void *b)
 {
-    return ((const book_entry_t*)b)->score - ((const book_entry_t*)a)->score;
+    return (int)((const book_entry_t*)b)->weight - (int)((const book_entry_t*)a)->weight;
 }
 
 /* 显示宽度: ASCII 计 1, 中文字符计 2 */
@@ -497,7 +567,7 @@ static void print_branches(char board[10][9], book_entry_t *entry, int nCount, i
         char cn[32];
         if(i == played) continue;
         move_cn(board, entry[i].move, cn);
-        printf("%s(%d)%s", cn, entry[i].score, entry[i].valid ? "" : "*");
+        printf("%s(%d)", cn, entry[i].weight);
         if(i < nCount - 1) printf(" ");
         if(i >= 7 && nCount > 9) { printf("..."); break; }
     }
@@ -537,10 +607,8 @@ static int play_step(char board[10][9], int red, int step, const char *input, in
     }
     else if(bi >= 0)
     {
-        printf("第 %d 步 %s: %s %s  [在谱] 评分%d 胜%d 和%d 负%d%s\n",
-               step, red ? "红" : "黑", cn, ic,
-               entry[bi].score, entry[bi].win_count, entry[bi].draw_count,
-               entry[bi].lost_count, entry[bi].valid ? "" : " (被禁)");
+        printf("第 %d 步 %s: %s %s  [在谱] 权重%d\n",
+               step, red ? "红" : "黑", cn, ic, entry[bi].weight);
         print_branches(board, entry, nCount, bi);
     }
     else
@@ -555,18 +623,14 @@ static int play_step(char board[10][9], int red, int step, const char *input, in
     return 0;
 }
 
-static void play_mode(int nmv, char **moves)
+static int play_mode(int nmv, char **moves)
 {
     char board[10][9];
     int red, step = 1, i, oob = 0;
     book_entry_t entry[128];
     int nCount;
 
-    if(sqlite3_open(book_path, &db) != SQLITE_OK)
-    {
-        printf("无法打开 %s\n", book_path);
-        return;
-    }
+    if(!load_book(book_path)) return 1;
     red = fen_to_board(START_FEN, board);
     printf("=== 分叉跟踪(从初始局面) ===\n");
     print_board(board);
@@ -632,87 +696,49 @@ static void play_mode(int nmv, char **moves)
             red = !red;
         }
     }
-    sqlite3_close(db);
+    free_book();
     fflush(stdout);
     /* tcc 0.9.27 CRT 在特定代码路径下 exit 清理时会崩溃, 输出已刷新, 直接退出 */
     _exit(0);
+    return 0;
 }
 
 static int check_book_file(const char *path)
 {
-    sqlite3 *check_db = NULL;
-    sqlite3_stmt *stmt = NULL;
-    int rc, quick_rows = 0, valid = 0;
-
     printf("检查文件: %s\n", path);
-    rc = sqlite3_open_v2(path, &check_db, SQLITE_OPEN_READONLY, NULL);
-    if(rc != SQLITE_OK)
+    if(!load_book(path))
     {
-        printf("检查结果: 不合法 (无法打开: %s)\n",
-               check_db ? sqlite3_errmsg(check_db) : "未知错误");
-        goto done;
+        printf("检查结果: 不合法\n");
+        return 1;
     }
-
-    rc = sqlite3_prepare_v2(check_db, "PRAGMA quick_check;", -1, &stmt, NULL);
-    if(rc != SQLITE_OK)
-    {
-        printf("检查结果: 不合法 (%s)\n", sqlite3_errmsg(check_db));
-        goto done;
-    }
-    while((rc = sqlite3_step(stmt)) == SQLITE_ROW)
-    {
-        const unsigned char *result = sqlite3_column_text(stmt, 0);
-        quick_rows++;
-        if(!result || strcmp((const char*)result, "ok"))
-        {
-            printf("检查结果: 不合法 (%s)\n",
-                   result ? (const char*)result : "quick_check 未返回结果");
-            goto done;
-        }
-    }
-    if(rc != SQLITE_DONE || quick_rows != 1)
-    {
-        printf("检查结果: 不合法 (%s)\n", sqlite3_errmsg(check_db));
-        goto done;
-    }
-    sqlite3_finalize(stmt);
-    stmt = NULL;
-
-    rc = sqlite3_prepare_v2(check_db,
-        "SELECT vkey,vmove,vscore,vwin,vdraw,vlost,vvalid,vmemo FROM bhobk LIMIT 0;",
-        -1, &stmt, NULL);
-    if(rc != SQLITE_OK)
-    {
-        printf("检查结果: 不合法 (bhobk 表或必需字段缺失: %s)\n",
-               sqlite3_errmsg(check_db));
-        goto done;
-    }
-
     printf("检查结果: 合法\n");
-    printf("SQLite 快速检查及 bhobk 表必需字段检查均通过。\n");
-    valid = 1;
-
-done:
-    sqlite3_finalize(stmt);
-    if(check_db) sqlite3_close(check_db);
-    return valid ? 0 : 1;
+    printf("记录: %Iu, 局面: %Iu\n", book_entry_count, book_position_count);
+    free_book();
+    return 0;
 }
 
 static void print_help(void)
 {
-    printf("OBK 象棋开局库查询工具\n\n");
+    printf("jqxq 二进制象棋开局库查询工具\n\n");
     printf("用法:\n");
     printf("  bhobk.exe                   查询初始局面\n");
     printf("  bhobk.exe <FEN>             查询指定局面(FEN 含空格需加引号)\n");
-    printf("  bhobk.exe --key <vkey>      直接按 vkey 查询\n");
-    printf("  bhobk.exe --demo            查询演示 key\n");
+    printf("  bhobk.exe --key <vkey>      按 jqxq key 查询(十进制或 0x 十六进制)\n");
+    printf("  bhobk.exe --demo            查询初始局面 key\n");
     printf("  bhobk.exe --play [着法...]  分叉跟踪; 无着法时进入交互模式\n");
-    printf("  bhobk.exe --db <文件>       指定开局库(默认 test.obk)\n");
-    printf("  bhobk.exe --check           快速检查开局库是否合法\n");
+    printf("  bhobk.exe --book <文件>     指定开局库(默认 book.bin)\n");
+    printf("  bhobk.exe --check           检查二进制开局库是否合法\n");
     printf("  bhobk.exe -h, --help        显示此帮助\n\n");
-    printf("--db 和 --check 需放在其他查询参数之前。\n");
+    printf("--book 和 --check 需放在其他查询参数之前。\n");
     printf("着法支持中文或 ICCS 坐标(如 炮二平五、h2-e2)。\n");
     printf("交互模式: b=回退一步, 空行/q=退出。\n");
+}
+
+static int parse_key(const char *text, unsigned __int64 *key)
+{
+    if(text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        return sscanf(text + 2, "%I64x", key) == 1;
+    return sscanf(text, "%I64u", key) == 1;
 }
 
 int main(int argc, char **argv)
@@ -724,7 +750,7 @@ int main(int argc, char **argv)
     char board[10][9];
     int have_board = 0, red_to_move = 1;
     char fen[512] = {0};
-    char db_path_arg[512];
+    char book_path_arg[512];
     char *moves_ptr[128];
 
 #ifdef _WIN32
@@ -735,15 +761,15 @@ int main(int argc, char **argv)
 
     while(argi < argc)
     {
-        if(!strcmp(argv[argi], "--db"))
+        if(!strcmp(argv[argi], "--book"))
         {
             if(argi + 1 >= argc)
             {
-                printf("--db 需要指定 .obk 文件名。\n");
+                printf("--book 需要指定二进制开局库文件名。\n");
                 return 1;
             }
-            to_utf8(argv[argi + 1], db_path_arg, sizeof(db_path_arg));
-            book_path = db_path_arg;
+            to_utf8(argv[argi + 1], book_path_arg, sizeof(book_path_arg));
+            book_path = book_path_arg;
             argi += 2;
         }
         else if(!strcmp(argv[argi], "--check"))
@@ -792,21 +818,28 @@ int main(int argc, char **argv)
             to_utf8(argv[2 + i], u8args[i], 512);
             moves_ptr[i] = u8args[i];
         }
-        play_mode(nmv, moves_ptr);
-        return 0;
+        return play_mode(nmv, moves_ptr);
     }
 
     if(argc > 1 && !strcmp(argv[1], "--demo"))
     {
-        key = 15265892774299731920ULL;
+        key = 0x52DFA0347C3B4C0FULL;
     }
     else if(argc > 2 && !strcmp(argv[1], "--key"))
     {
-        sscanf(argv[2], "%I64u", &key);
+        if(!parse_key(argv[2], &key))
+        {
+            printf("无效的 vkey: %s\n", argv[2]);
+            return 1;
+        }
     }
     else if(argc > 1 && argv[1][0] >= '0' && argv[1][0] <= '9')
     {
-        sscanf(argv[1], "%I64u", &key);
+        if(!parse_key(argv[1], &key))
+        {
+            printf("无效的 vkey: %s\n", argv[1]);
+            return 1;
+        }
     }
     else
     {
@@ -834,14 +867,9 @@ int main(int argc, char **argv)
         print_board(board);
     }
 
-    if(sqlite3_open(book_path, &db) != SQLITE_OK)
-    {
-        printf("无法打开 %s\n", book_path);
-        return 1;
-    }
-
+    if(!load_book(book_path)) return 1;
     nCount = GetBookEntry(entry, key);
-    sqlite3_close(db);
+    free_book();
 
     printf("vkey: %I64u\n", key);
     printf("命中 %d 条开局库着法:\n\n", nCount);
@@ -852,10 +880,10 @@ int main(int argc, char **argv)
     }
     qsort(entry, nCount, sizeof(book_entry_t), cmp_entry);
     print_pad("着法", 12); print_pad("ICCS", 9);
-    printf("%6s %4s %4s %4s %4s  %s\n", "评分", "胜", "和", "负", "有效", "备注");
+    printf("%6s\n", "权重");
     for(i = 0; i < nCount; i++)
     {
-        char cn[32], ic[16], memo[256];
+        char cn[32], ic[16];
         if(have_board)
         {
             move_cn(board, entry[i].move, cn);
@@ -866,11 +894,8 @@ int main(int argc, char **argv)
             sprintf(cn, "<move=%u>", entry[i].move);
             ic[0] = 0;
         }
-        memo_utf8(entry[i].comments, memo, sizeof(memo));
         print_pad(cn, 12); print_pad(ic, 9);
-        printf("%6d %4d %4d %4d %4d  %s\n",
-               entry[i].score, entry[i].win_count, entry[i].draw_count,
-               entry[i].lost_count, entry[i].valid, memo);
+        printf("%6d\n", entry[i].weight);
     }
     return 0 ;
 }

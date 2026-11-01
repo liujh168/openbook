@@ -1,6 +1,11 @@
-# OBK 象棋开局库查询工具
+# 象棋开局库转换与查询工具
 
-开局库 `test.obk` 本质是 SQLite 数据库，存 15.6 万条局面着法（评分 + 胜/和/负统计）。
+项目提供两个相互独立的数据路径：
+
+- `convert_obk.py` + `bhobk.exe`：将原 `test.obk` 转为 jqxq 私有的 `book.bin`，按权重查询。
+- `obk.py`：继续查询原始 SQLite OBK，显示评分、胜/和/负、有效标记和备注。
+
+原 `test.obk` 保持不变。C 版默认读取 `book.bin`，不再访问 SQLite。
 
 ## 快速开始
 
@@ -8,58 +13,76 @@
 bhobk.exe                    :: 查询初始局面（显示帮助提示）
 bhobk.exe -h                 :: 查看命令行帮助（也支持 --help）
 bhobk.exe "<FEN>"            :: 查询任意局面（FEN 含空格要加引号）
-bhobk.exe --key <vkey>       :: 直接按 vkey 查（无棋盘，显示原始走法码）
-bhobk.exe --demo             :: 查询演示 key 15265892774299731920
+bhobk.exe --key <vkey>       :: 按 jqxq key 查询，支持十进制和 0x 十六进制
+bhobk.exe --demo             :: 查询初始目标 key 0x52DFA0347C3B4C0F
 bhobk.exe --play 炮二平五 马8进7   :: 分叉跟踪（中文着法或 ICCS 均可）
 bhobk.exe --play             :: 交互式分叉跟踪（b=回退，空行/q 退出）
-bhobk.exe --db other.obk     :: 指定开局库，可配合其他查询参数使用
-bhobk.exe --check            :: 快速检查默认 test.obk 是否合法
-bhobk.exe --db other.obk --check  :: 快速检查指定开局库
+bhobk.exe --book other.bin   :: 指定二进制开局库
+bhobk.exe --check            :: 检查默认 book.bin
+bhobk.exe --book other.bin --check  :: 检查指定二进制库
 ```
 
-`--db` 和 `--check` 需放在其他查询参数之前。检查包括 SQLite `quick_check` 以及 `bhobk` 表和查询必需字段；合法时退出码为 0，否则为 1。
+`--book` 和 `--check` 需放在其他查询参数之前。C 查询输出为中文着法、ICCS 和权重，按权重降序；合法时 `--check` 返回退出码 0，否则返回 1。
 
-Python 等价工具（便于脚本集成）：
+初始目标局面有 3 条候选：
+
+```text
+vkey: 5971667778199571471
+炮二平五    h2-e2     1545
+兵七进一    c3-c4      749
+相三进五    g0-e2      705
+```
+
+原始 OBK 查询：
 
 ```bash
 python obk.py                 # 查初始局面
 python obk.py "<FEN>"         # 查任意 FEN
-python obk.py --key <vkey>    # 按 vkey 查
+python obk.py --key <vkey>    # 按原 OBK vkey 查
+python obk.py --demo          # 查高位 REAL 位模式演示 key
 ```
 
-查询输出：中文着法 + ICCS 坐标 + 评分 + 胜/和/负盘数 + 有效标记（1=推荐，0=被做库者禁用），按评分降序。
+## 转换为 book.bin
 
-示例（初始局面）：
-
-```
-vkey: 7101337512282506414
-炮二平五    h2-e2     949  292  957  296    1
-相三进五    g0-e2     576  150  462   93    1
-兵七进一    c3-c4     412  146  442  161    1
+```bat
+python convert_obk.py
+python convert_obk.py test.obk -o book.bin
+python convert_obk.py --verify book.bin
 ```
 
-## 数据格式（test.obk）
+可选 `--max-plies N` 限制遍历半回合数；默认不限深度，从初始局面沿有效着法完整遍历。转换器只读打开 SQLite，并在同目录临时文件写入、校验后原子替换目标文件。
 
-SQLite 数据库，表 `bhobk`：
+转换语义：
 
-| 列 | 含义 |
-|---|---|
-| vkey | 局面 Zobrist 哈希（64 位，见下） |
-| vmove | 走法编码：`(from << 8) \| to`，坐标为 16×16 mailbox（左上角 0x33） |
-| vscore | 评分 |
-| vwin / vdraw / vlost | 胜 / 和 / 负盘数 |
-| vvalid | 1=允许，0=禁用 |
-| vmemo | 备注（GBK 编码 BLOB） |
-| vindex | 开局步数（大多为空） |
+- 只接受 `vvalid=1` 的记录，禁用记录不写入，也不沿其继续遍历。
+- `count = vwin + vdraw + vlost`；零权重记录可继续遍历，但自身不写入。
+- 重复 `(key, move)` 合并，权重饱和至 65535，`learn=0`。
+- 可达的非法着法会带源 rowid 报错并停止，不猜测或强行转换。
+- 不可达记录不写入；没有局面键的 `vkey=NULL` 记录也归入不可达统计。
+- `vscore`、分开的胜/和/负、`vmemo`、`vindex` 和禁用记录无法保留在目标格式中。
 
-### vkey 计算约定（已与库内数据验证一致）
+当前完整转换结果为 **377 条记录、285 个局面、6032 字节**。转换结束会报告源记录、输出记录/局面、可达禁用、零权重、不可达及权重饱和统计。
 
-- 棋盘格号：16×16 mailbox，`sq = ((row+3) << 4) | (col+3)`，row 0 = 黑方底线
-- 棋子编号：红 帅0 仕1 相2 马3 车4 炮5 兵6；黑 将7 士8 象9 马10 车11 炮12 卒13
-- `key = XOR(ZT[棋子][格号])`，红方走子时再 `XOR 11587246140411948888`（ZP）
-- 随机表 `ZT[14][256]` 在 `zobrist.h` / `zobrist_table.py`，提取自 `局面HASHKEY计算.txt`
-- 验证锚点：初始局面 key = **7101337512282506414**
-- **注意**：key ≥ 2⁶³ 时库里按「位模式重解释的 REAL」（double 的 8 字节 = key 的 8 字节）存储，查询需按此绑定参数；key < 2⁶³ 按 INTEGER 存储
+## 数据格式
+
+### jqxq book.bin
+
+每条记录固定 16 字节，小端 `<QHHI`：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| key | uint64 | jqxq Zobrist 局面键 |
+| move | uint16 | `(from << 8) \| to`，16×16 mailbox 坐标 |
+| count | uint16 | 胜、和、负总数，非零 |
+| learn | uint32 | 保留，固定为 0 |
+
+记录严格按 `(key, move)` 排序，C 查询器使用二分查找。目标哈希使用 `jqxq_zobrist.h` 的 3842 个常量，黑方走子时异或第 3840 项；初始 key 为 `0x52DFA0347C3B4C0F`。转换器解析同一头文件，避免 C/Python 常量不一致。
+
+该格式仅沿用 Polyglot 的条目布局，不能读取标准国际象棋 Polyglot 库。
+
+### 原始 test.obk
+
+SQLite 表 `bhobk` 包含 `vkey`、`vmove`、`vscore`、`vwin`、`vdraw`、`vlost`、`vvalid`、`vmemo` 和 `vindex`。原 OBK key 使用 `zobrist_table.py` 的 `ZT[14][256]`，红方走子异或 `ZP`，初始 key 为 `7101337512282506414`。高位键在 SQLite 中按 REAL 的 8 字节位模式保存，`obk.py` 与转换器均兼容 INTEGER/REAL 两种形式。
 
 ## 编译
 
@@ -67,9 +90,7 @@ SQLite 数据库，表 `bhobk`：
 build.bat
 ```
 
-使用便携版 TinyCC（`tcc/`，无需安装），将 `bhobk.c` 与 SQLite 3.54.1 源码（`sqlite-amalgamation-3540100/`）直接编译为单个 exe，约 1.4 MB，无外部依赖。
-
-> 提示：编译后若立即运行报"拒绝访问"，是 Windows 安全软件在扫描新 exe，稍等一两秒即可。
+使用便携版 TinyCC（`tcc/`，无需安装）将 `bhobk.c` 编译为单个 EXE。C 版只需 `jqxq_zobrist.h`，不再编译 SQLite。
 
 ## 回归测试
 
@@ -77,18 +98,22 @@ build.bat
 python -m unittest discover -s tests -v
 ```
 
-测试使用 Python 标准库 `unittest`，会先执行 `build.bat`，再通过真实命令行验证当前程序。首轮固定初始局面 15 条结果、高位 vkey、C/Python 一致性、中文与 ICCS 分叉跟踪，以及 `--db` / `--check` 的正常和异常路径，不遍历全部开局库记录。
+测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖转换语义、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏二进制库、C 查询与分叉，以及原 Python OBK 的已知结果锚点。
 
 ## 文件清单
 
 | 文件 | 说明 |
 |---|---|
-| `bhobk.c` / `bhobk.exe` | C 版查询工具（含 FEN、中文着法翻译、分叉跟踪） |
-| `obk.py` | Python 版查询工具 |
-| `xqgen.py` | 走法生成器（验证/集成用） |
-| `zobrist.h` / `zobrist_table.py` | Zobrist 哈希表（C / Python 版） |
-| `test.obk` | 开局库|
-| `shim.h` | TinyCC 兼容垫片（补充其头文件缺失的 Win32 声明） |
+| `convert_obk.py` | 独立 OBK → jqxq 二进制库转换器 |
+| `book.bin` | 已生成并校验的 jqxq 开局库 |
+| `jqxq_zobrist.h` | C/Python 共用的目标 Zobrist 常量 |
+| `bhobk.c` / `bhobk.exe` | 二进制库查询与分叉跟踪工具 |
+| `obk.py` | 原始 SQLite OBK 查询工具 |
+| `test.obk` | 原始开局库，保持不变 |
+| `zobrist.h` / `zobrist_table.py` | 原 OBK Zobrist 表 |
+| `xqgen.py` | 原伪合法走法生成器 |
+| `tests/` | 转换与命令行回归测试 |
 | `tcc/` | 便携版 TinyCC 0.9.27 |
+| `LICENSE` | 提取算法所依据的 jqxq GPL-3.0+ 许可文本 |
 
-## 更新记录（2026-11-1）
+转换算法和目标随机表提取自 jqxq（GPL-3.0+），源文件为 `tests/make_book.py`、`tests/xiangqi_oracle.py` 和 `zobrist.cpp`，相关来源与许可说明保留在新增源码中。
