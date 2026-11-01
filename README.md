@@ -47,10 +47,13 @@ python obk.py --demo          # 查高位 REAL 位模式演示 key
 ```bat
 python convert_obk.py
 python convert_obk.py test.obk -o book.bin
+python convert_obk.py other.obk -o book.bin --merge
 python convert_obk.py --verify book.bin
 ```
 
-可选 `--max-plies N` 限制遍历半回合数；默认不限深度，从初始局面沿有效着法完整遍历。转换器只读打开 SQLite，并在同目录临时文件写入、校验后原子替换目标文件。
+可选 `--max-plies N` 限制遍历半回合数；默认不限深度，从初始局面沿有效着法完整遍历。默认每次从空库开始并覆盖目标；指定 `--merge` 时，目标文件必须已存在且通过格式校验，转换器会先读入已有记录，再与新来源按 `(key, move)` 合并，重复项权重相加并饱和至 65535。
+
+转换器只读打开 SQLite，并在同目录临时文件写入、校验后原子替换目标文件。
 
 转换语义：
 

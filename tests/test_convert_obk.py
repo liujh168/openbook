@@ -79,6 +79,34 @@ class ConvertObkTests(unittest.TestCase):
         co.atomic_write(second, data)
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
+    def test_make_book_merges_existing_entries_and_saturates(self):
+        path, child, _ = self.fixture()
+        output = self.root / "book.bin"
+        existing = co.BookBuilder()
+        existing.add(co.jqxq_key(self.start, self.randoms), 0xAAA7, 65534)
+        existing.add(0x1234, 0x3A59, 7)
+        co.atomic_write(output, existing.serialize())
+
+        builder, _, summary = co.make_book(path, output, merge=True)
+
+        self.assertEqual(builder.entries(), sorted([
+            (0x1234, 0x3A59, 7, 0),
+            (co.jqxq_key(child, self.randoms), 0x3A59, 5, 0),
+            (co.jqxq_key(self.start, self.randoms), 0xAAA7, 65535, 0),
+        ]))
+        self.assertEqual(builder.saturations, 1)
+        self.assertEqual(summary["entries"], 3)
+        self.assertEqual(co.verify_book(output), summary)
+
+    def test_merge_rejects_invalid_existing_book_without_replacing_it(self):
+        path, _, _ = self.fixture()
+        output = self.root / "book.bin"
+        output.write_bytes(b"bad")
+
+        with self.assertRaisesRegex(co.BookError, "multiple of 16"):
+            co.make_book(path, output, merge=True)
+        self.assertEqual(output.read_bytes(), b"bad")
+
     def test_verify_rejects_corruption(self):
         valid = co.ENTRY.pack(1, 0xAAA7, 1, 0)
         cases = [

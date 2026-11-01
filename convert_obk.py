@@ -357,9 +357,20 @@ def atomic_write(path, data):
         raise
 
 
-def make_book(input_path, output_path, max_plies=None):
+def load_book(path, builder):
+    summary = verify_book(path)
+    data = Path(path).read_bytes()
+    for offset in range(0, len(data), ENTRY.size):
+        key, move, count, _ = ENTRY.unpack_from(data, offset)
+        builder.add(key, move, count)
+    return summary
+
+
+def make_book(input_path, output_path, max_plies=None, merge=False):
     randoms = load_jqxq_randoms()
     builder = BookBuilder()
+    if merge:
+        load_book(output_path, builder)
     stats = import_obk(input_path, builder, randoms, max_plies=max_plies)
     data = builder.serialize()
     summary = verify_book(data)
@@ -372,6 +383,7 @@ def main(argv=None):
     parser.add_argument("input", nargs="?", default="test.obk", help="源 OBK 文件")
     parser.add_argument("-o", "--output", default="book.bin", help="目标二进制库")
     parser.add_argument("--max-plies", type=int, help="最大遍历半回合数，默认不限")
+    parser.add_argument("--merge", action="store_true", help="读取并合并已有目标库")
     parser.add_argument("--verify", metavar="FILE", help="只校验已有二进制库")
     args = parser.parse_args(argv)
     try:
@@ -379,7 +391,8 @@ def main(argv=None):
             summary = verify_book(args.verify)
             print("校验通过: entries={entries} positions={positions} bytes={bytes}".format(**summary))
             return 0
-        builder, stats, summary = make_book(args.input, args.output, args.max_plies)
+        builder, stats, summary = make_book(
+            args.input, args.output, args.max_plies, merge=args.merge)
         print(f"源记录: {stats.sqlite_records}")
         print(f"输出记录: {summary['entries']}")
         print(f"输出局面: {summary['positions']}")
