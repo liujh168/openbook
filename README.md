@@ -33,14 +33,22 @@ vkey: 5971667778199571471
 相三进五    g0-e2      705
 ```
 
-原始 OBK 查询：
+原始 OBK 查询与分叉跟踪：
 
 ```bash
 python obk.py                 # 查初始局面
-python obk.py "<FEN>"         # 查任意 FEN
-python obk.py --key <vkey>    # 按原 OBK vkey 查
+python obk.py "<FEN>"         # 查任意 FEN，显示文本棋盘
+python obk.py --key <vkey>    # 按原 OBK 十进制 vkey 查
 python obk.py --demo          # 查高位 REAL 位模式演示 key
+python obk.py --db other.obk --demo       # 指定原始 SQLite OBK
+python obk.py --check                     # 检查默认 test.obk
+python obk.py --db other.obk --check      # 检查指定 OBK
+python obk.py --play 炮二平五 马8进7       # 批量分叉跟踪
+python obk.py --play h2-e2 h9-g7          # 使用 ICCS 着法
+python obk.py --play                      # 交互跟踪，b=回退，空行/q 退出
 ```
+
+Python 版 `--db` 读取原始 `.obk`，与 C 版读取二进制库的 `--book` 不同。`--check` 只读执行 SQLite 快速检查并验证 `bhobk` 必需字段，合法时返回 0，否则返回 1。分叉按评分降序显示，逐步报告在谱、到边界、脱谱或已出谱状态，并保留胜/和/负、禁用标记和备注查询能力。
 
 ## 转换为 book.bin
 
@@ -101,7 +109,7 @@ build.bat
 python -m unittest discover -s tests -v
 ```
 
-测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖转换语义、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏二进制库、C 查询与分叉，以及原 Python OBK 的已知结果锚点。
+测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖转换语义、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏二进制库、C 查询与分叉，以及原 Python OBK 的已知结果、库校验、批量/交互分叉和错误处理。
 
 ## 文件清单
 
@@ -111,10 +119,10 @@ python -m unittest discover -s tests -v
 | `book.bin` | 已生成并校验的 jqxq 开局库 |
 | `jqxq_zobrist.h` | C/Python 共用的目标 Zobrist 常量 |
 | `bhobk.c` / `bhobk.exe` | 二进制库查询与分叉跟踪工具 |
-| `obk.py` | 原始 SQLite OBK 查询工具 |
+| `obk.py` | 原始 SQLite OBK 查询、校验与分叉跟踪工具 |
 | `test.obk` | 原始开局库，保持不变 |
 | `zobrist.h` / `zobrist_table.py` | 原 OBK Zobrist 表 |
-| `xqgen.py` | 原伪合法走法生成器 |
+| `xqgen.py` | 转换器与 OBK 分叉共用的伪合法走法生成器 |
 | `tests/` | 转换与命令行回归测试 |
 | `tcc/` | 便携版 TinyCC 0.9.27 |
 | `LICENSE` | 提取算法所依据的 jqxq GPL-3.0+ 许可文本 |

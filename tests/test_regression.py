@@ -51,11 +51,12 @@ BOOK_FEN_RE = re.compile(
     r"^\s*(\S+)\s+([a-i]\d+-[a-i]\d+)\s+(\d+)", re.MULTILINE)
 
 
-def run_tool(args, expected_code=0, python=False):
+def run_tool(args, expected_code=0, python=False, input_text=None):
     command = [sys.executable, str(ROOT / "obk.py")] if python else [str(EXE)]
     result = subprocess.run(
         command + list(args), cwd=ROOT, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, encoding="utf-8", timeout=30)
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", timeout=30,
+        input=input_text)
     if result.returncode != expected_code:
         raise AssertionError(
             f"命令 {command + list(args)} 退出码为 {result.returncode}，"
@@ -110,6 +111,86 @@ class RegressionTests(unittest.TestCase):
         output = run_tool(["--demo"], python=True)
         self.assertIn(f"vkey: {OBK_DEMO_KEY}", output)
         self.assertEqual(obk_raw_rows(output), OBK_DEMO_ROWS)
+
+    def test_python_obk_explicit_db_and_check(self):
+        default_output = run_tool(["--demo"], python=True)
+        explicit_output = run_tool(["--db", "test.obk", "--demo"], python=True)
+        self.assertEqual(obk_raw_rows(explicit_output), obk_raw_rows(default_output))
+        for args in (["--check"], ["--db", "test.obk", "--check"]):
+            with self.subTest(args=args):
+                output = run_tool(args, python=True)
+                self.assertIn("检查结果: 合法", output)
+                self.assertIn("bhobk 表必需字段检查均通过", output)
+
+    def test_python_obk_check_rejects_invalid_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = root / "missing.obk"
+            output = run_tool(["--db", str(missing), "--check"], expected_code=1, python=True)
+            self.assertIn("检查结果: 不合法", output)
+            self.assertIn("无法打开", output)
+            self.assertFalse(missing.exists())
+
+            corrupt = root / "corrupt.obk"
+            corrupt.write_bytes(b"not a SQLite database")
+            output = run_tool(["--db", str(corrupt), "--check"], expected_code=1, python=True)
+            self.assertIn("检查结果: 不合法", output)
+
+            missing_table = root / "missing-table.obk"
+            connection = sqlite3.connect(missing_table)
+            connection.execute("CREATE TABLE other(value)")
+            connection.close()
+            output = run_tool(["--db", str(missing_table), "--check"], expected_code=1, python=True)
+            self.assertIn("检查结果: 不合法", output)
+            self.assertIn("bhobk", output)
+
+    def test_python_obk_play_chinese_and_iccs(self):
+        for moves in (["炮二平五", "马8进7"], ["H2-E2", "H9-G7"]):
+            with self.subTest(moves=moves):
+                output = run_tool(["--play", *moves], python=True)
+                self.assertIn("第 1 步 红: 炮二平五 h2-e2  [在谱] 评分949 胜292 和957 负296", output)
+                self.assertIn("第 2 步 黑: 马8进7 h9-g7  [在谱] 评分874 胜269 和846 负255", output)
+                self.assertRegex(output, r"当前轮到红,\s+分叉\(8\): 马二进三\(426\)")
+
+    def test_python_obk_play_disabled_out_of_book_and_invalid_moves(self):
+        output = run_tool(["--play", "马八进七"], python=True)
+        self.assertIn("第 1 步 红: 马八进七 b0-c2  [在谱]", output)
+        self.assertIn("(被禁)", output)
+
+        output = run_tool(["--play", "e0-e1", "h9-g7"], python=True)
+        self.assertIn("第 1 步 红: 帅五进一 e0-e1  [脱谱]", output)
+        self.assertIn("第 2 步 黑: 马8进7 h9-g7  [已出谱]", output)
+
+        output = run_tool(["--play", "不是着法"], python=True)
+        self.assertIn("无法识别着法 \"不是着法\"", output)
+
+    def test_python_obk_interactive_back_and_quit(self):
+        output = run_tool(["--play"], python=True, input_text="炮二平五\nb\nq\n")
+        self.assertIn("第 1 步 红: 炮二平五 h2-e2  [在谱]", output)
+        self.assertIn("已回退到第 1 步 红走子", output)
+        output = run_tool(["--play"], python=True, input_text="b\n\n")
+        self.assertIn("已经是初始局面, 无法回退", output)
+
+    def test_python_obk_help_no_arguments_and_errors(self):
+        for option in ("-h", "--help"):
+            with self.subTest(option=option):
+                output = run_tool([option], python=True)
+                self.assertIn("--db", output)
+                self.assertIn("--check", output)
+                self.assertIn("--play", output)
+        output = run_tool([], python=True)
+        self.assertIn("使用 -h 或 --help 查看命令行帮助", output)
+        self.assertIn(f"vkey: {OBK_START_KEY}", output)
+        self.assertIn("楚 河 漢 界", output)
+
+        output = run_tool(["--check", "--demo"], expected_code=1, python=True)
+        self.assertIn("--check 不能与其他查询参数同时使用", output)
+        output = run_tool(["--key", "invalid"], expected_code=1, python=True)
+        self.assertIn("无效的 vkey: invalid", output)
+        output = run_tool(["bad-fen"], expected_code=1, python=True)
+        self.assertIn("FEN 应有 10 行", output)
+        output = run_tool(["--db"], expected_code=1, python=True)
+        self.assertIn("参数错误", output)
 
     def test_initial_binary_key_and_weights(self):
         expected = {move: values[2] for move, values in BOOK_INITIAL_ROWS.items()}
