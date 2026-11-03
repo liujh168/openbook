@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""原始 SQLite OBK 查询与分叉跟踪工具。
+"""SQLite OBK 与 CCBridge3 CBL 查询及分叉跟踪工具。
 
 提供 FEN/key 查询、库校验、中文/ICCS 着法解析及批量/交互跟踪。
 """
@@ -10,6 +10,8 @@ import sqlite3
 import struct
 import sys
 
+from cbl import CBL_MAGIC, CBLError, read_cbl
+from convert_obk import Board
 from xqgen import apply, gen_moves
 from zobrist_table import ZT, ZP
 
@@ -79,9 +81,11 @@ def open_book(db_path=DB):
 
 
 def query_book(key, db_path=DB):
-    """查询局面着法，兼容 INTEGER 与 REAL 位模式两种 key 存储形态。"""
+    """查询 OBK 原始记录或 CBL 聚合着法，统一为七字段行。"""
     if isinstance(key, bool) or not isinstance(key, int) or not 0 <= key <= MASK64:
         raise ObkError(f"无效的 vkey: {key}")
+    if is_cbl_book(db_path):
+        return get_cbl_book(db_path).query(key)
     value = key
     if key >= (1 << 63):
         value = struct.unpack('<d', struct.pack('<Q', key))[0]
@@ -95,7 +99,9 @@ def query_book(key, db_path=DB):
 
 
 def check_book(db_path=DB):
-    """检查 SQLite 完整性和 bhobk 必需字段，失败时抛出 ObkError。"""
+    """检查 OBK 完整性，或解析 CBL 并验证全部可回放分支。"""
+    if is_cbl_book(db_path):
+        return get_cbl_book(db_path)
     try:
         with closing(open_book(db_path)) as connection:
             rows = connection.execute("PRAGMA quick_check;").fetchall()
@@ -137,6 +143,88 @@ def move_iccs(mv):
 
 def apply_move(board, mv):
     return apply(board, decode_move(mv))
+
+
+class CBLBook:
+    def __init__(self, db_path):
+        self.path = Path(db_path)
+        self.entries = {}
+        self.game_count = 0
+        self.move_count = 0
+        self.skipped_branches = 0
+        self.skipped_moves = 0
+        try:
+            library = read_cbl(self.path)
+        except CBLError as error:
+            raise ObkError(str(error)) from error
+        self.name = library.name
+        self.game_count = len(library.games)
+        for index, game in enumerate(library.games, 1):
+            try:
+                board = Board(game.cells(), 0 if game.red_first else 1)
+                board.in_check(0)
+                board.in_check(1)
+            except (CBLError, ValueError) as error:
+                raise ObkError(f"{self.path}: 第 {index} 局初始棋盘无效: {error}") from error
+            self._index_moves(game.moves, board)
+
+    @staticmethod
+    def _key(board):
+        cells = {(index // 9, index % 9): piece
+                 for index, piece in enumerate(board.cells) if piece != "."}
+        return board_to_key(cells, board.side == 0)
+
+    @staticmethod
+    def _subtree_size(moves):
+        return sum(1 + CBLBook._subtree_size(move.children) for move in moves)
+
+    def _index_moves(self, moves, board):
+        for cbl_move in moves:
+            source, target = cbl_move.source, cbl_move.target
+            piece = board.cells[source]
+            move_board = Board(board.cells, 0 if piece.isupper() else 1) if piece != "." else board
+            if piece == "." or not move_board.legal((source, target)):
+                self.skipped_branches += 1
+                self.skipped_moves += 1 + self._subtree_size(cbl_move.children)
+                continue
+            move = (source // 9, source % 9, target // 9, target % 9)
+            encoded = encode_move(move)
+            entry = self.entries.setdefault(self._key(move_board), {}).setdefault(encoded, [0, []])
+            entry[0] += 1
+            self.move_count += 1
+            if cbl_move.annotation and cbl_move.annotation not in entry[1]:
+                entry[1].append(cbl_move.annotation)
+            self._index_moves(cbl_move.children, move_board.apply((source, target)))
+
+    def query(self, key):
+        return [(mv, count, 0, 0, 0, 1, "\n".join(annotations))
+                for mv, (count, annotations) in self.entries.get(key, {}).items()]
+
+
+_CBL_CACHE = {}
+
+
+def is_cbl_book(db_path):
+    path = Path(db_path)
+    if path.suffix.lower() == ".cbl":
+        return True
+    try:
+        with path.open("rb") as stream:
+            return stream.read(len(CBL_MAGIC)) == CBL_MAGIC
+    except OSError:
+        return False
+
+
+def get_cbl_book(db_path):
+    path = Path(db_path).resolve()
+    try:
+        stat = path.stat()
+    except OSError as error:
+        raise ObkError(f"无法打开 {db_path}: {error}") from error
+    identity = (str(path), stat.st_mtime_ns, stat.st_size)
+    if identity not in _CBL_CACHE:
+        _CBL_CACHE[identity] = CBLBook(path)
+    return _CBL_CACHE[identity]
 
 
 def move_cn(board, red_to_move, mv):
@@ -241,8 +329,11 @@ def play_step(board, red_to_move, step, text, out_of_book, db_path=DB):
         out_of_book = True
     elif index >= 0:
         row = rows[index]
-        print(f"第 {step} 步 {side}: {cn} {ic}  [在谱] 评分{row[1]} "
-              f"胜{row[2]} 和{row[3]} 负{row[4]}{'' if row[5] else ' (被禁)'}")
+        if is_cbl_book(db_path):
+            print(f"第 {step} 步 {side}: {cn} {ic}  [在谱] 次数{row[1]}")
+        else:
+            print(f"第 {step} 步 {side}: {cn} {ic}  [在谱] 评分{row[1]} "
+                  f"胜{row[2]} 和{row[3]} 负{row[4]}{'' if row[5] else ' (被禁)'}")
         print_branches(board, rows, index)
     else:
         print(f"第 {step} 步 {side}: {cn} {ic}  [脱谱] 库中无此着法, 此后脱谱")
@@ -312,6 +403,7 @@ def play_mode(moves, db_path=DB, input_stream=None):
 
 
 def show(fen=None, key=None, db_path=DB):
+    cbl = is_cbl_book(db_path)
     if fen is not None:
         board, red_to_move = fen_to_board(fen)
         key = board_to_key(board, red_to_move)
@@ -321,12 +413,17 @@ def show(fen=None, key=None, db_path=DB):
     else:
         board, red_to_move = None, True
     print(f"vkey: {key}")
+    if cbl:
+        print(f"棋库: {get_cbl_book(db_path).name}")
     rows = query_book(key, db_path)
     print(f"命中 {len(rows)} 条开局库着法:\n")
     if not rows:
         print("  (库中无此局面)")
         return
-    print(f"  {'着法':<8}{'ICCS':<10}{'评分':>5} {'胜':>4} {'和':>4} {'负':>4} {'有效':>4}  备注")
+    if cbl:
+        print(f"  {'着法':<8}{'ICCS':<10}{'次数':>5}  备注")
+    else:
+        print(f"  {'着法':<8}{'ICCS':<10}{'评分':>5} {'胜':>4} {'和':>4} {'负':>4} {'有效':>4}  备注")
     for mv, score, w, d, l, valid, memo in sorted_entries(rows):
         if board is not None:
             cn = move_cn(board, red_to_move, mv)
@@ -339,7 +436,10 @@ def show(fen=None, key=None, db_path=DB):
         m = ""
         if memo:
             m = memo.decode("gbk", errors="replace") if isinstance(memo, bytes) else str(memo)
-        print(f"  {cn:<8}{ic:<10}{score:>5} {w:>4} {d:>4} {l:>4} {valid:>4}  {m}")
+        if cbl:
+            print(f"  {cn:<8}{ic:<10}{score:>5}  {m}")
+        else:
+            print(f"  {cn:<8}{ic:<10}{score:>5} {w:>4} {d:>4} {l:>4} {valid:>4}  {m}")
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -350,13 +450,14 @@ class ArgumentParser(argparse.ArgumentParser):
 
 def build_parser():
     parser = ArgumentParser(
-        description="OBK 象棋开局库查询工具",
+        description="OBK/CCBridge3 CBL 象棋开局库查询工具",
         epilog="着法支持中文或 ICCS 坐标(如 炮二平五、h2-e2)；交互模式支持 b=回退，空行/q=退出。")
-    parser.add_argument("--db", metavar="文件", default=DB, help=f"指定原始 OBK(默认 {DB})")
-    parser.add_argument("--check", action="store_true", help="快速检查开局库是否合法")
+    parser.add_argument("--db", metavar="文件", default=DB,
+                        help=f"指定原始 OBK 或 CCBridge3 CBL(默认 {DB})")
+    parser.add_argument("--check", action="store_true", help="检查开局库结构和可回放分支")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--key", metavar="vkey", help="直接按十进制 vkey 查询")
-    modes.add_argument("--demo", action="store_true", help="查询高位 REAL 位模式演示 key")
+    modes.add_argument("--demo", action="store_true", help="OBK 查询高位 REAL 演示 key；CBL 查询初始局面")
     modes.add_argument("--play", nargs="*", metavar="着法", help="分叉跟踪；无着法时进入交互模式")
     parser.add_argument("fen", nargs="*", help="查询指定 FEN；缺省查询初始局面")
     return parser
@@ -377,18 +478,24 @@ def main(argv=None):
         if args.check:
             print(f"检查文件: {args.db}")
             try:
-                check_book(args.db)
+                book = check_book(args.db)
             except ObkError as error:
                 print(f"检查结果: 不合法 ({error})")
                 return 1
             print("检查结果: 合法")
-            print("SQLite 快速检查及 bhobk 表必需字段检查均通过。")
+            if is_cbl_book(args.db):
+                print(f"CBL 棋谱: {book.game_count}, 合法着法: {book.move_count}, "
+                      f"跳过分支: {book.skipped_branches}, 跳过非法着法: {book.skipped_moves}")
+            else:
+                print("SQLite 快速检查及 bhobk 表必需字段检查均通过。")
             return 0
         if args.play is not None:
             play_mode(args.play, args.db)
             return 0
         if args.demo:
-            show(key=15265892774299731920, db_path=args.db)
+            demo_key = (board_to_key(*fen_to_board(START_FEN)) if is_cbl_book(args.db)
+                        else 15265892774299731920)
+            show(key=demo_key, db_path=args.db)
             return 0
         if args.key is not None:
             try:

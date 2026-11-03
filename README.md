@@ -34,22 +34,27 @@ vkey: 5971667778199571471
 相三进五    g0-e2      705
 ```
 
-原始 OBK 查询与分叉跟踪：
+原始 OBK 与 CCBridge3 CBL 查询、分叉跟踪：
 
 ```bash
 python obk.py                 # 查初始局面
 python obk.py "<FEN>"         # 查任意 FEN，显示文本棋盘
 python obk.py --key <vkey>    # 按原 OBK 十进制 vkey 查
-python obk.py --demo          # 查高位 REAL 位模式演示 key
+python obk.py --demo          # OBK 查高位 REAL 演示 key；CBL 查初始局面
 python obk.py --db other.obk --demo       # 指定原始 SQLite OBK
+python obk.py --db other.CBL              # 查询 CBL 初始局面
+python obk.py --db other.CBL "<FEN>"      # 查询 CBL 任意局面
+python obk.py --db other.CBL --key <vkey> # 按 OBK Zobrist key 查询 CBL
 python obk.py --check                     # 检查默认 test.obk
 python obk.py --db other.obk --check      # 检查指定 OBK
+python obk.py --db other.CBL --check      # 检查 CBL 并统计非法分支
 python obk.py --play 炮二平五 马8进7       # 批量分叉跟踪
 python obk.py --play h2-e2 h9-g7          # 使用 ICCS 着法
+python obk.py --db other.CBL --play 炮二平五 马8进7
 python obk.py --play                      # 交互跟踪，b=回退，空行/q 退出
 ```
 
-Python 版 `--db` 读取原始 `.obk`，与 C 版读取二进制库的 `--book` 不同。`--check` 只读执行 SQLite 快速检查并验证 `bhobk` 必需字段，合法时返回 0，否则返回 1。分叉按评分降序显示，逐步报告在谱、到边界、脱谱或已出谱状态，并保留胜/和/负、禁用标记和备注查询能力。
+Python 版 `--db` 按扩展名和文件签名自动识别原始 `.obk` 或 CCBridge3 `.CBL`，与 C 版读取二进制库的 `--book` 不同。OBK `--check` 只读执行 SQLite 快速检查并验证 `bhobk` 必需字段；CBL 则解析全部棋谱、建立缓存索引并验证行棋，报告合法着法及跳过的非法分支，合法时返回 0，否则返回 1。分叉逐步报告在谱、到边界、脱谱或已出谱状态，支持中文/ICCS 和交互回退。OBK 按评分降序并保留胜/和/负、禁用标记和备注；CBL 按出现次数降序，重复局面着法合并计数，注解显示在备注列。
 
 ## 转换为 book.bin
 
@@ -120,7 +125,7 @@ build.bat
 python -m unittest discover -s tests -v
 ```
 
-测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖 OBK/CBL 转换语义、CBL 主变/变着与非法分支、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏输入、C 查询与分叉，以及原 Python OBK 的已知结果、库校验、批量/交互分叉和错误处理。
+测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖 OBK/CBL 转换语义、CBL 主变/变着与非法分支、CBL FEN/key 查询与校验、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏输入、C 查询与分叉，以及 Python OBK/CBL 的已知结果、批量/交互分叉和错误处理。
 
 ## 文件清单
 
@@ -131,7 +136,7 @@ python -m unittest discover -s tests -v
 | `book.bin` | 已生成并校验的 jqxq 开局库 |
 | `jqxq_zobrist.h` | C/Python 共用的目标 Zobrist 常量 |
 | `bhobk.c` / `bhobk.exe` | 二进制库查询与分叉跟踪工具 |
-| `obk.py` | 原始 SQLite OBK 查询、校验与分叉跟踪工具 |
+| `obk.py` | 原始 OBK/CCBridge3 CBL 查询、校验与分叉跟踪工具 |
 | `test.obk` | 原始开局库，保持不变 |
 | `zobrist.h` / `zobrist_table.py` | 原 OBK Zobrist 表 |
 | `xqgen.py` | 转换器与 OBK 分叉共用的伪合法走法生成器 |
