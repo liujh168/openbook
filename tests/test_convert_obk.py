@@ -1,3 +1,8 @@
+"""OBK 到 book.bin 转换逻辑的单元测试。
+
+使用临时 SQLite 和二进制数据覆盖键值恢复、转换语义、合并饱和及损坏输入。
+"""
+
 import sqlite3
 import struct
 import sys

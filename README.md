@@ -1,11 +1,12 @@
 # 象棋开局库转换与查询工具
 
-项目提供两个相互独立的数据路径：
+项目提供三个数据路径：
 
-- `convert_obk.py` + `bhobk.exe`：将原 `test.obk` 转为 jqxq 私有的 `book.bin`，按权重查询。
+- `convert_obk.py` + `bhobk.exe`：将原 `test.obk` 或 CCBridge3 `.CBL` 转为 jqxq 私有的 `book.bin`，按权重查询。
 - `obk.py`：继续查询原始 SQLite OBK，显示评分、胜/和/负、有效标记和备注。
+- `cbl.py`：独立解析 CCBridge3 CBL/CBR，提供棋盘、棋谱信息、注解及主变/变着树。
 
-原 `test.obk` 保持不变。C 版默认读取 `book.bin`，不再访问 SQLite。
+原 `test.obk` 和输入 CBL 均保持不变。C 版默认读取 `book.bin`，不再访问 SQLite。
 
 ## 快速开始
 
@@ -56,14 +57,15 @@ Python 版 `--db` 读取原始 `.obk`，与 C 版读取二进制库的 `--book` 
 python convert_obk.py
 python convert_obk.py test.obk -o book.bin
 python convert_obk.py other.obk -o book.bin --merge
+python convert_obk.py "中炮对单提马新变.CBL" -o cbl_book.bin
 python convert_obk.py --verify book.bin
 ```
 
-可选 `--max-plies N` 限制遍历半回合数；默认不限深度，从初始局面沿有效着法完整遍历。默认每次从空库开始并覆盖目标；指定 `--merge` 时，目标文件必须已存在且通过格式校验，转换器会先读入已有记录，再与新来源按 `(key, move)` 合并，重复项权重相加并饱和至 65535。
+可选 `--max-plies N` 限制遍历半回合数；OBK 从初始局面计算深度，CBL 则分别限制每局棋的深度，默认均不限。默认每次从空库开始并覆盖目标；指定 `--merge` 时，目标文件必须已存在且通过格式校验，转换器会先读入已有记录，再与新来源按 `(key, move)` 合并，重复项权重相加并饱和至 65535。
 
-转换器只读打开 SQLite，并在同目录临时文件写入、校验后原子替换目标文件。
+转换器只读打开 SQLite 或读取 CBL，并在同目录临时文件写入、校验后原子替换目标文件。
 
-转换语义：
+OBK 转换语义：
 
 - 只接受 `vvalid=1` 的记录，禁用记录不写入，也不沿其继续遍历。
 - `count = vwin + vdraw + vlost`；零权重记录可继续遍历，但自身不写入。
@@ -72,7 +74,16 @@ python convert_obk.py --verify book.bin
 - 不可达记录不写入；没有局面键的 `vkey=NULL` 记录也归入不可达统计。
 - `vscore`、分开的胜/和/负、`vmemo`、`vindex` 和禁用记录无法保留在目标格式中。
 
-当前完整转换结果为 **377 条记录、285 个局面、6032 字节**。转换结束会报告源记录、输出记录/局面、可达禁用、零权重、不可达及权重饱和统计。
+当前 `test.obk` 完整转换结果为 **377 条记录、285 个局面、6032 字节**。转换结束会报告源记录、输出记录/局面、可达禁用、零权重、不可达及权重饱和统计。
+
+CBL 转换语义：
+
+- 支持 CCBridge3 的 `CCBridgeLibrary` 棋库，解析棋盘、先行方、注解以及主变/变着树。说明书中的 2.09/2.1 版 `CCBridge` 是另一种旧格式，目前不在命令行支持范围内。
+- CBL 不含着法权重；每个合法存储着法贡献权重 1，跨棋谱及分支重复时累加并饱和至 65535。
+- 转换时检查完整行棋合法性。遇到非法着法时跳过该分支及其后继，继续处理其他分支，并报告跳过分支数和着法数。
+- 棋盘、标题、棋手和注解用于解析，但目标格式仍只保留局面键、着法和权重。
+
+所附 `中炮对单提马新变.CBL` 含 1 局大型开局树、32253 步着法；转换导入 32242 步，跳过 3 个非法分支共 11 步，生成 **31073 条记录、30553 个局面、497168 字节**。
 
 ## 数据格式
 
@@ -109,13 +120,14 @@ build.bat
 python -m unittest discover -s tests -v
 ```
 
-测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖转换语义、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏二进制库、C 查询与分叉，以及原 Python OBK 的已知结果、库校验、批量/交互分叉和错误处理。
+测试仅使用 Python 标准库，会先执行实际转换和 `build.bat`。覆盖 OBK/CBL 转换语义、CBL 主变/变着与非法分支、mailbox 走法、INTEGER/REAL 高位键、合并饱和、损坏输入、C 查询与分叉，以及原 Python OBK 的已知结果、库校验、批量/交互分叉和错误处理。
 
 ## 文件清单
 
 | 文件 | 说明 |
 |---|---|
-| `convert_obk.py` | 独立 OBK → jqxq 二进制库转换器 |
+| `convert_obk.py` | 独立 OBK/CCBridge3 CBL → jqxq 二进制库转换器 |
+| `cbl.py` | CCBridge3 CBL/CBR 棋盘、注解和变着树解析器 |
 | `book.bin` | 已生成并校验的 jqxq 开局库 |
 | `jqxq_zobrist.h` | C/Python 共用的目标 Zobrist 常量 |
 | `bhobk.c` / `bhobk.exe` | 二进制库查询与分叉跟踪工具 |
@@ -125,6 +137,6 @@ python -m unittest discover -s tests -v
 | `xqgen.py` | 转换器与 OBK 分叉共用的伪合法走法生成器 |
 | `tests/` | 转换与命令行回归测试 |
 | `tcc/` | 便携版 TinyCC 0.9.27 |
-| `LICENSE` | 提取算法所依据的 jqxq GPL-3.0+ 许可文本 |
+| `LICENSE` | jqxq 与 cchess 所采用的 GPL-3.0+ 许可文本 |
 
-转换算法和目标随机表提取自 jqxq（GPL-3.0+），源文件为 `tests/make_book.py`、`tests/xiangqi_oracle.py` 和 `zobrist.cpp`，相关来源与许可说明保留在新增源码中。
+OBK 转换算法和目标随机表提取自 jqxq（GPL-3.0+），源文件为 `tests/make_book.py`、`tests/xiangqi_oracle.py` 和 `zobrist.cpp`。CBL 二进制布局参考 [walker8088/cchess](https://github.com/walker8088/cchess) 的 `src/cchess/read_cbr.py`（GPL-3.0+），已改为独立数据模型和有界读取；相关来源与许可说明保留在源码中。

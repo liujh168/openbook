@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""xqgen.py — 精简象棋走法生成(伪合法,开局验证够用)"""
+"""精简的中国象棋伪合法走法生成器。
+
+供 OBK 查询与分叉跟踪生成候选着法并应用走子，不负责完整规则裁决。
+"""
 def gen_moves(board, red):
     """board: {(r,c):ch}; red: 当前走子方。产出 (fr,fc,tr,tc)"""
     moves = []

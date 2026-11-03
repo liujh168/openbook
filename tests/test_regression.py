@@ -1,3 +1,8 @@
+"""命令行端到端回归测试。
+
+实际构建并调用转换器、bhobk.exe 和 obk.py，验证查询、校验、分叉及错误处理。
+"""
+
 import re
 import sqlite3
 import struct

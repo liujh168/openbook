@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Convert the current SQLite OBK format to jqxq's 16-byte book format.
+"""OBK/CCBridge3 CBL 到 jqxq book.bin 的转换器。
+
+负责输入识别、行棋合法性检查、权重合并、深度限制、原子写入和格式校验。
 
 Conversion algorithms are derived from jqxq's tests/make_book.py and
 xiangqi_oracle.py. jqxq is licensed under GPL-3.0+; see LICENSE.
@@ -15,6 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cbl import CBL_MAGIC, CBLError, read_cbl
 from zobrist_table import ZT, ZP
 
 ROOT = Path(__file__).resolve().parent
@@ -119,7 +122,12 @@ class Board:
 
 @dataclass
 class Stats:
+    source_format: str = "OBK"
     sqlite_records: int = 0
+    cbl_games: int = 0
+    cbl_moves: int = 0
+    cbl_skipped_branches: int = 0
+    cbl_skipped_moves: int = 0
     observations: int = 0
     disabled_records: int = 0
     zero_weight_records: int = 0
@@ -312,6 +320,47 @@ def import_obk(path, builder, randoms, max_plies=None, stats=None):
     return stats
 
 
+def import_cbl(path, builder, randoms, max_plies=None, stats=None):
+    stats = stats if stats is not None else Stats()
+    stats.source_format = "CBL"
+    if max_plies is not None and max_plies < 0:
+        raise BookError("--max-plies must be nonnegative")
+    try:
+        library = read_cbl(path)
+    except CBLError as error:
+        raise BookError(str(error)) from error
+    stats.cbl_games += len(library.games)
+
+    def subtree_size(moves):
+        return sum(1 + subtree_size(move.children) for move in moves)
+
+    def import_moves(moves, board, depth):
+        if max_plies is not None and depth >= max_plies:
+            return
+        for cbl_move in moves:
+            move = (cbl_move.source, cbl_move.target)
+            piece = board.cells[move[0]]
+            move_board = Board(board.cells, 0 if piece.isupper() else 1) if piece != "." else board
+            if piece == "." or not move_board.legal(move):
+                stats.cbl_skipped_branches += 1
+                stats.cbl_skipped_moves += 1 + subtree_size(cbl_move.children)
+                continue
+            builder.add(jqxq_key(move_board, randoms), encoded_move(move))
+            stats.cbl_moves += 1
+            stats.observations += 1
+            import_moves(cbl_move.children, move_board.apply(move), depth + 1)
+
+    for index, game in enumerate(library.games, 1):
+        try:
+            board = Board(game.cells(), 0 if game.red_first else 1)
+            board.in_check(0)
+            board.in_check(1)
+        except (CBLError, ValueError) as error:
+            raise BookError(f"{path}: game {index}: invalid initial board: {error}") from error
+        import_moves(game.moves, board, 0)
+    return stats
+
+
 def verify_book(source):
     if isinstance(source, (str, os.PathLike)):
         path = Path(source)
@@ -371,7 +420,12 @@ def make_book(input_path, output_path, max_plies=None, merge=False):
     builder = BookBuilder()
     if merge:
         load_book(output_path, builder)
-    stats = import_obk(input_path, builder, randoms, max_plies=max_plies)
+    with Path(input_path).open("rb") as stream:
+        signature = stream.read(len(CBL_MAGIC))
+    if Path(input_path).suffix.lower() == ".cbl" or signature == CBL_MAGIC:
+        stats = import_cbl(input_path, builder, randoms, max_plies=max_plies)
+    else:
+        stats = import_obk(input_path, builder, randoms, max_plies=max_plies)
     data = builder.serialize()
     summary = verify_book(data)
     atomic_write(output_path, data)
@@ -379,10 +433,10 @@ def make_book(input_path, output_path, max_plies=None, merge=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="将当前 SQLite OBK 转换为 jqxq book.bin")
-    parser.add_argument("input", nargs="?", default="test.obk", help="源 OBK 文件")
+    parser = argparse.ArgumentParser(description="将 SQLite OBK 或 CCBridge3 CBL 转换为 jqxq book.bin")
+    parser.add_argument("input", nargs="?", default="test.obk", help="源 OBK 或 CBL 文件")
     parser.add_argument("-o", "--output", default="book.bin", help="目标二进制库")
-    parser.add_argument("--max-plies", type=int, help="最大遍历半回合数，默认不限")
+    parser.add_argument("--max-plies", type=int, help="每局最大转换半回合数，默认不限")
     parser.add_argument("--merge", action="store_true", help="读取并合并已有目标库")
     parser.add_argument("--verify", metavar="FILE", help="只校验已有二进制库")
     args = parser.parse_args(argv)
@@ -393,12 +447,19 @@ def main(argv=None):
             return 0
         builder, stats, summary = make_book(
             args.input, args.output, args.max_plies, merge=args.merge)
-        print(f"源记录: {stats.sqlite_records}")
+        if stats.source_format == "CBL":
+            print(f"CBL 棋谱: {stats.cbl_games}")
+            print(f"CBL 着法: {stats.cbl_moves}")
+            print(f"跳过非法分支: {stats.cbl_skipped_branches}")
+            print(f"跳过非法着法: {stats.cbl_skipped_moves}")
+        else:
+            print(f"源记录: {stats.sqlite_records}")
         print(f"输出记录: {summary['entries']}")
         print(f"输出局面: {summary['positions']}")
-        print(f"可达禁用记录: {stats.disabled_records}")
-        print(f"零权重记录: {stats.zero_weight_records}")
-        print(f"不可达记录: {stats.unmatched_records}")
+        if stats.source_format == "OBK":
+            print(f"可达禁用记录: {stats.disabled_records}")
+            print(f"零权重记录: {stats.zero_weight_records}")
+            print(f"不可达记录: {stats.unmatched_records}")
         print(f"权重饱和次数: {builder.saturations}")
         if stats.unmatched_examples:
             print("不可达示例: " + ", ".join(stats.unmatched_examples))

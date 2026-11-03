@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""查询原始 SQLite OBK，并跟踪中文或 ICCS 着法分叉。"""
+"""原始 SQLite OBK 查询与分叉跟踪工具。
+
+提供 FEN/key 查询、库校验、中文/ICCS 着法解析及批量/交互跟踪。
+"""
 import argparse
 from contextlib import closing
 from pathlib import Path
