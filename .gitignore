@@ -4,4 +4,6 @@ __pycache__/
 *.obj
 *.tmp
 *.log
+*.bin
+*.[cC][bB][lL]
 book.bin.*
